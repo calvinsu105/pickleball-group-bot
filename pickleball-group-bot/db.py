@@ -1,5 +1,6 @@
 """資料儲存：有設定 DATABASE_URL 就用 PostgreSQL，否則用本機 SQLite（僅供測試）。"""
 import os
+import random
 import sqlite3
 import time
 
@@ -20,6 +21,10 @@ PG_SCHEMA = [
         guests INTEGER NOT NULL DEFAULT 0,
         voted_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (poll_id, user_id))""",
+    # 已處理過的 LINE 事件編號，用來忽略 LINE 重送的重複事件
+    """CREATE TABLE IF NOT EXISTS processed_events (
+        event_id TEXT PRIMARY KEY,
+        created_at DOUBLE PRECISION NOT NULL)""",
 ]
 SQLITE_SCHEMA = [
     s.replace("SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
@@ -96,6 +101,22 @@ class Database:
         if fetch == "all":
             return [dict(r) for r in rows]
         return None
+
+    # ---- 重複事件 ----
+    def claim_event(self, event_id):
+        """登記這個事件編號。第一次看到回傳 True；已處理過（LINE 重送）回傳 False。"""
+        row = self._execute(
+            "INSERT INTO processed_events (event_id, created_at) VALUES (?, ?)"
+            " ON CONFLICT (event_id) DO NOTHING RETURNING event_id",
+            (event_id, time.time()), fetch="one",
+        )
+        if random.random() < 0.02:  # 偶爾清掉 3 天前的紀錄，避免資料表一直變大
+            self._execute("DELETE FROM processed_events WHERE created_at < ?", (time.time() - 3 * 86400,))
+        return row is not None
+
+    def release_event(self, event_id):
+        """處理失敗時取消登記，讓 LINE 重送時可以再處理一次。"""
+        self._execute("DELETE FROM processed_events WHERE event_id = ?", (event_id,))
 
     # ---- 揪團 ----
     def create_poll(self, chat_id, creator_id, creator_name, f):

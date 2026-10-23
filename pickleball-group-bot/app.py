@@ -1,5 +1,6 @@
 import json
 import os
+from functools import wraps
 from urllib.parse import parse_qs
 
 from flask import Flask, abort, request
@@ -91,6 +92,28 @@ def list_messages(chat_id):
     return messages
 
 
+def once(func):
+    """同一個 LINE 事件只處理一次。
+
+    Render 回應太慢時，LINE 會重送同一個事件（Webhook redelivery），
+    例如按一次「➕ 攜伴」卻被加好幾次。每個事件都有唯一的 webhookEventId，
+    處理過的就直接略過。"""
+    @wraps(func)
+    def wrapper(event):
+        event_id = getattr(event, "webhook_event_id", None)
+        if not event_id:
+            return func(event)
+        if not db.claim_event(event_id):
+            app.logger.info("略過重複的事件：%s", event_id)
+            return None
+        try:
+            return func(event)
+        except Exception:
+            db.release_event(event_id)
+            raise
+    return wrapper
+
+
 # ---------- Webhook ----------
 @app.get("/")
 def health():
@@ -109,6 +132,7 @@ def callback():
 
 
 @handler.add(JoinEvent)
+@once
 def on_join(event):
     """機器人被邀請進群組時，送出使用說明。"""
     with ApiClient(configuration) as client:
@@ -116,6 +140,7 @@ def on_join(event):
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
+@once
 def on_text(event):
     text = event.message.text
     if text.strip() == LIST_COMMAND:
@@ -145,6 +170,7 @@ def on_text(event):
 
 
 @handler.add(PostbackEvent)
+@once
 def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
