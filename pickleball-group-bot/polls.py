@@ -2,6 +2,7 @@
 import re
 
 TRIGGER = "揪團"
+LIST_COMMAND = "場次"
 
 # 每個欄位可接受的標籤寫法
 FIELD_LABELS = {

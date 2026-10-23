@@ -21,9 +21,9 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from cards import poll_card
+from cards import delete_confirm_card, list_carousel, poll_card
 from db import Database
-from polls import TEMPLATE, TRIGGER, is_trigger, parse_poll
+from polls import LIST_COMMAND, TEMPLATE, TRIGGER, is_trigger, parse_poll
 
 app = Flask(__name__)
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
@@ -34,8 +34,10 @@ HELP = (
     "🏓 匹克球揪團小幫手\n"
     f"在群組輸入以「{TRIGGER}」開頭的訊息，就會建立報名卡片：\n\n"
     f"{TEMPLATE}\n\n"
-    "大家按卡片上的「參加／不參加」即可報名，名單會自動更新。"
+    "大家按卡片上的「參加／不參加」即可報名，名單會自動更新。\n"
+    f"輸入「{LIST_COMMAND}」可查看所有揪團場次，也可以在那裡刪除場次。"
 )
+GONE = "⚠️ 這場揪團已經被刪除了。輸入「場次」查看目前的揪團。"
 
 
 # ---------- 小工具 ----------
@@ -61,9 +63,25 @@ def reply(api, token, messages):
     api.reply_message(ReplyMessageRequest(reply_token=token, messages=messages))
 
 
+def flex(contents, alt):
+    return FlexMessage(alt_text=alt, contents=FlexContainer.from_json(json.dumps(contents)))
+
+
 def card_message(poll, note=None):
     bubble, alt = poll_card(poll, db.get_votes(poll["id"]), note)
-    return FlexMessage(alt_text=alt, contents=FlexContainer.from_json(json.dumps(bubble)))
+    return flex(bubble, alt)
+
+
+def list_messages(chat_id):
+    polls = db.list_polls(chat_id)
+    if not polls:
+        return [TextMessage(text=f"目前沒有揪團場次。\n輸入「{TRIGGER}」查看如何建立揪團。")]
+    carousel, alt = list_carousel(polls)
+    messages = []
+    if len(polls) > 12:
+        messages.append(TextMessage(text=f"共 {len(polls)} 場揪團，以下顯示最新的 12 場。"))
+    messages.append(flex(carousel, alt))
+    return messages
 
 
 # ---------- Webhook ----------
@@ -93,6 +111,10 @@ def on_join(event):
 @handler.add(MessageEvent, message=TextMessageContent)
 def on_text(event):
     text = event.message.text
+    if text.strip() == LIST_COMMAND:
+        with ApiClient(configuration) as client:
+            reply(MessagingApi(client), event.reply_token, list_messages(chat_id_of(event.source)))
+        return
     if not is_trigger(text):
         return  # 群組內其他聊天一律不回應
 
@@ -118,21 +140,44 @@ def on_text(event):
 @handler.add(PostbackEvent)
 def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
-    if data.get("action") != "vote" or data.get("choice") not in ("yes", "no"):
+    action = data.get("action")
+    if action not in ("vote", "show", "ask_delete", "delete", "cancel") or not data.get("poll", "").isdigit():
         return
 
-    poll = db.get_poll(int(data["poll"]))
     src = event.source
-    if not poll or poll["chat_id"] != chat_id_of(src):
-        return  # 找不到或不是這個群組的揪團
-
     with ApiClient(configuration) as client:
         api = MessagingApi(client)
-        name = display_name(api, src)
-        db.vote(poll["id"], src.user_id, name, data["choice"])
+        token = event.reply_token
+        poll = db.get_poll(int(data["poll"]))
 
-        action = "參加" if data["choice"] == "yes" else "不參加"
-        reply(api, event.reply_token, [card_message(poll, f"最新名單（{name} {action}）")])
+        if not poll:  # 已被刪除的場次，舊卡片上的按鈕仍可能被按到
+            if action != "cancel":
+                reply(api, token, [TextMessage(text=GONE)])
+            return
+        if poll["chat_id"] != chat_id_of(src):
+            return  # 不是這個群組的揪團
+
+        if action == "vote" and data.get("choice") in ("yes", "no"):
+            name = display_name(api, src)
+            db.vote(poll["id"], src.user_id, name, data["choice"])
+            label = "參加" if data["choice"] == "yes" else "不參加"
+            reply(api, token, [card_message(poll, f"最新名單（{name} {label}）")])
+
+        elif action == "show":
+            reply(api, token, [card_message(poll, "目前名單")])
+
+        elif action == "ask_delete":
+            bubble, alt = delete_confirm_card(poll, db.count_yes(poll["id"]))
+            reply(api, token, [flex(bubble, alt)])
+
+        elif action == "delete":
+            db.delete_poll(poll["id"])
+            name = display_name(api, src)
+            msg = f"🗑 {name} 已刪除揪團：{poll['date']} {poll['time']} {poll['venue']}"
+            reply(api, token, [TextMessage(text=msg)])
+
+        elif action == "cancel":
+            reply(api, token, [TextMessage(text="已取消，場次沒有被刪除。")])
 
 
 if __name__ == "__main__":

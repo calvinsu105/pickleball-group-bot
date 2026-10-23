@@ -1,0 +1,235 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>揪團小幫手架構圖</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column, the system diagram breaks out wider; court-line teal accent, ball-yellow marks the request path */
+:root {
+  --bg: #F4F7F5;
+  --surface: #FFFFFF;
+  --fg: #17241E;
+  --muted: #5C6B64;
+  --line: #CBD6D0;
+  --accent: #1F6F5C;
+  --ball: #C9B400;
+  --ball-soft: #F3EDB8;
+  --font-body: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111916; --surface: #18221E; --fg: #E4ECE8; --muted: #94A49D; --line: #2E3C36;
+    --accent: #5FC3A6; --ball: #E6D44A; --ball-soft: #3A3714; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111916; --surface: #18221E; --fg: #E4ECE8; --muted: #94A49D; --line: #2E3C36;
+  --accent: #5FC3A6; --ball: #E6D44A; --ball-soft: #3A3714; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  font-size: 16px; line-height: 1.7;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+header { display: flex; flex-direction: column; gap: 8px; }
+.eyebrow { font-size: 13px; letter-spacing: .12em; color: var(--accent); font-weight: 700; }
+h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.25; font-weight: 900; margin: 0; text-wrap: balance; }
+h2 { font-size: 22px; margin: 0; font-weight: 700; text-wrap: balance; }
+p { margin: 0; }
+.lede { color: var(--muted); max-width: 62ch; }
+section { display: flex; flex-direction: column; gap: 16px; }
+code { font-family: var(--font-mono); font-size: .88em; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; overflow-wrap: anywhere; }
+
+figure { margin: 0; display: flex; flex-direction: column; gap: 12px; }
+.wide { width: min(1000px, calc(100vw - 48px)); margin-left: 50%; transform: translateX(-50%); }
+.scroll { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.scroll svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--fg); }
+figcaption { font-size: 14px; color: var(--muted); max-width: 70ch; }
+svg text { font-family: var(--font-body); }
+svg .mono { font-family: var(--font-mono); }
+
+.flows { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.flow { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.flow h3 { margin: 0; font-size: 17px; }
+.flow ol { margin: 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 8px; font-size: 15px; }
+.flow li::marker { color: var(--accent); font-weight: 700; }
+.where { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: .04em; margin-right: 6px; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; min-width: 560px; }
+th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 13px; color: var(--muted); font-weight: 500; letter-spacing: .04em; }
+tr:last-child td { border-bottom: 0; }
+td:first-child { font-weight: 700; white-space: nowrap; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.card { border-top: 3px solid var(--accent); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.card b { font-size: 16px; }
+.card span { font-size: 14px; color: var(--muted); }
+.note { font-size: 15px; background: var(--ball-soft); border-radius: 8px; padding: 14px 16px; }
+</style>
+
+<main>
+  <header>
+    <div class="eyebrow">PICKLEBALL GROUP BOT · 架構</div>
+    <h1>匹克球揪團小幫手，訊息怎麼跑</h1>
+    <p class="lede">機器人由四個網路服務組成：LINE 負責收發訊息，Render 執行程式，Neon 保存揪團與投票，GitHub 存放程式碼並觸發部署。Render 是中心，其他服務都只和它溝通。</p>
+  </header>
+
+  <section>
+    <h2>服務關係圖</h2>
+    <figure class="wide">
+      <div class="scroll">
+        <svg viewBox="0 0 1000 520" role="img" aria-label="群組成員透過 LINE 平台傳訊息，LINE 平台以 Webhook 呼叫 Render 上的 Flask 程式，程式讀寫 Neon 資料庫後，再透過 LINE 的 reply API 把卡片回覆到群組；GitHub push 後自動部署到 Render。">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+            <marker id="arrBall" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" style="fill:var(--ball)"/>
+            </marker>
+          </defs>
+
+          <!-- GitHub -->
+          <rect x="566" y="24" width="150" height="58" rx="8" stroke="currentColor" stroke-width="1.5" style="fill:var(--surface)"/>
+          <text x="641" y="50" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">GitHub</text>
+          <text x="641" y="70" text-anchor="middle" font-size="12" style="fill:var(--muted)">存放程式碼</text>
+          <line x1="641" y1="82" x2="641" y2="138" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="652" y="115" font-size="12" style="fill:var(--muted)">push 後自動部署</text>
+
+          <!-- Members -->
+          <rect x="16" y="205" width="140" height="100" rx="8" stroke="currentColor" stroke-width="1.5" style="fill:var(--surface)"/>
+          <text x="86" y="245" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">群組成員</text>
+          <text x="86" y="267" text-anchor="middle" font-size="12" style="fill:var(--muted)">手機 LINE App</text>
+
+          <!-- LINE platform -->
+          <rect x="236" y="185" width="150" height="140" rx="8" stroke="currentColor" stroke-width="1.5" style="fill:var(--surface)"/>
+          <text x="311" y="240" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">LINE 平台</text>
+          <text x="311" y="262" text-anchor="middle" font-size="12" style="fill:var(--muted)">Messaging API</text>
+          <text x="311" y="280" text-anchor="middle" font-size="12" style="fill:var(--muted)">官方帳號</text>
+
+          <!-- Render -->
+          <rect x="516" y="140" width="250" height="230" rx="10" stroke-width="2" style="fill:var(--surface);stroke:var(--accent)"/>
+          <text x="536" y="168" font-size="15" font-weight="700" style="fill:var(--accent)">Render</text>
+          <text x="536" y="188" font-size="12" style="fill:var(--muted)">Flask + gunicorn，執行機器人</text>
+          <g font-size="12">
+            <rect x="536" y="204" width="100" height="66" rx="6" fill="none" stroke-width="1.5" style="stroke:var(--line)"/>
+            <text x="586" y="230" text-anchor="middle" class="mono" fill="currentColor">app.py</text>
+            <text x="586" y="250" text-anchor="middle" style="fill:var(--muted)">接收 Webhook</text>
+            <rect x="646" y="204" width="100" height="66" rx="6" fill="none" stroke-width="1.5" style="stroke:var(--line)"/>
+            <text x="696" y="230" text-anchor="middle" class="mono" fill="currentColor">polls.py</text>
+            <text x="696" y="250" text-anchor="middle" style="fill:var(--muted)">解析、算名單</text>
+            <rect x="536" y="284" width="100" height="66" rx="6" fill="none" stroke-width="1.5" style="stroke:var(--line)"/>
+            <text x="586" y="310" text-anchor="middle" class="mono" fill="currentColor">cards.py</text>
+            <text x="586" y="330" text-anchor="middle" style="fill:var(--muted)">產生卡片</text>
+            <rect x="646" y="284" width="100" height="66" rx="6" fill="none" stroke-width="1.5" style="stroke:var(--line)"/>
+            <text x="696" y="310" text-anchor="middle" class="mono" fill="currentColor">db.py</text>
+            <text x="696" y="330" text-anchor="middle" style="fill:var(--muted)">存取資料庫</text>
+          </g>
+
+          <!-- Neon -->
+          <rect x="846" y="205" width="138" height="100" rx="8" stroke="currentColor" stroke-width="1.5" style="fill:var(--surface)"/>
+          <text x="915" y="245" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">Neon</text>
+          <text x="915" y="267" text-anchor="middle" font-size="12" style="fill:var(--muted)">PostgreSQL</text>
+          <text x="915" y="285" text-anchor="middle" class="mono" font-size="11" style="fill:var(--muted)">polls · votes</text>
+
+          <!-- Members <-> LINE -->
+          <line x1="156" y1="235" x2="234" y2="235" stroke-width="2.5" marker-end="url(#arrBall)" style="stroke:var(--ball)"/>
+          <text x="196" y="226" text-anchor="middle" font-size="12" fill="currentColor">傳訊息</text>
+          <line x1="236" y1="280" x2="158" y2="280" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="196" y="299" text-anchor="middle" font-size="12" fill="currentColor">看到卡片</text>
+
+          <!-- LINE <-> Render -->
+          <line x1="386" y1="215" x2="514" y2="215" stroke-width="2.5" marker-end="url(#arrBall)" style="stroke:var(--ball)"/>
+          <text x="451" y="190" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">Webhook</text>
+          <text x="451" y="206" text-anchor="middle" class="mono" font-size="11" style="fill:var(--muted)">POST /callback</text>
+          <line x1="516" y1="300" x2="388" y2="300" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="451" y="320" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">回覆卡片</text>
+          <text x="451" y="336" text-anchor="middle" font-size="11" style="fill:var(--muted)">reply API · 查成員名稱</text>
+
+          <!-- Render <-> Neon -->
+          <line x1="766" y1="235" x2="844" y2="235" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="806" y="226" text-anchor="middle" font-size="12" fill="currentColor">寫入</text>
+          <line x1="846" y1="280" x2="768" y2="280" stroke="currentColor" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="806" y="299" text-anchor="middle" font-size="12" fill="currentColor">讀出名單</text>
+
+          <!-- UptimeRobot (optional) -->
+          <rect x="566" y="440" width="150" height="58" rx="8" fill="none" stroke-width="1.5" stroke-dasharray="5 4" style="stroke:var(--muted)"/>
+          <text x="641" y="465" text-anchor="middle" font-size="14" font-weight="700" style="fill:var(--muted)">UptimeRobot</text>
+          <text x="641" y="484" text-anchor="middle" font-size="12" style="fill:var(--muted)">選用，防止休眠</text>
+          <line x1="641" y1="440" x2="641" y2="372" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)" style="stroke:var(--muted)"/>
+          <text x="652" y="410" font-size="12" style="fill:var(--muted)">每 10 分鐘 GET /</text>
+
+          <!-- legend for the ball-yellow path -->
+          <line x1="16" y1="470" x2="56" y2="470" stroke-width="2.5" style="stroke:var(--ball)"/>
+          <text x="66" y="474" font-size="12" style="fill:var(--muted)">一則訊息進來的路線</text>
+          <line x1="16" y1="494" x2="56" y2="494" stroke-width="1.5" stroke-dasharray="5 4" style="stroke:var(--muted)"/>
+          <text x="66" y="498" font-size="12" style="fill:var(--muted)">選用服務</text>
+        </svg>
+      </div>
+      <figcaption>黃線是訊息進來的方向：成員 → LINE 平台 → Render。Render 處理完、讀寫 Neon 後，主動呼叫 LINE 的 reply API 把卡片送回群組。成員的手機從不直接連到 Render 或 Neon。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>兩種事件的完整流程</h2>
+    <div class="flows">
+      <div class="flow">
+        <h3>團主建立揪團</h3>
+        <ol>
+          <li><span class="where">LINE</span>團主在群組傳「揪團」訊息，日期、時間、場地、價錢各一行</li>
+          <li><span class="where">LINE → Render</span>LINE 平台把訊息 POST 到 <code>/callback</code>，附上簽章</li>
+          <li><span class="where">app.py</span>用 Channel secret 驗證簽章，確認真的是 LINE 送來的</li>
+          <li><span class="where">polls.py</span>拆出各欄位，缺欄位就回覆提醒</li>
+          <li><span class="where">db.py → Neon</span>在 <code>polls</code> 表新增一筆揪團</li>
+          <li><span class="where">cards.py → LINE</span>產生報名卡片，用 reply API 回覆到群組</li>
+        </ol>
+      </div>
+      <div class="flow">
+        <h3>成員按「參加」</h3>
+        <ol>
+          <li><span class="where">LINE</span>按鈕送出 postback，內容像 <code>action=vote&amp;poll=12&amp;choice=yes</code></li>
+          <li><span class="where">LINE → Render</span>同樣 POST 到 <code>/callback</code></li>
+          <li><span class="where">app.py → LINE</span>向 LINE 查詢這位成員在群組裡的名稱</li>
+          <li><span class="where">db.py → Neon</span>寫入或更新 <code>votes</code> 表的投票</li>
+          <li><span class="where">polls.py</span>讀出所有投票，依時間排出正取、候補、不參加</li>
+          <li><span class="where">cards.py → LINE</span>回覆最新名單卡片</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>服務之間靠哪些設定串起來</h2>
+    <p class="lede">每個服務都會產生一組資料，需要填到另一個服務裡。部署失敗時，通常是其中一項沒填或填錯。</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>設定</th><th>從哪裡取得</th><th>填到哪裡</th></tr></thead>
+        <tbody>
+          <tr><td>Channel secret</td><td>LINE Developers → Basic settings</td><td>Render Environment<br><code>LINE_CHANNEL_SECRET</code></td></tr>
+          <tr><td>Access token</td><td>LINE Developers → Messaging API</td><td>Render Environment<br><code>LINE_CHANNEL_ACCESS_TOKEN</code></td></tr>
+          <tr><td>連線字串</td><td>Neon → Connect</td><td>Render Environment<br><code>DATABASE_URL</code></td></tr>
+          <tr><td>Webhook URL</td><td>Render 網址加上 <code>/callback</code></td><td>LINE Developers → Messaging API</td></tr>
+          <tr><td>Root Directory</td><td>GitHub 上的資料夾名稱</td><td>Render → Settings</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>每個服務的角色與免費方案限制</h2>
+    <div class="cards">
+      <div class="card"><b>LINE 平台</b><span>收發群組訊息。機器人只用 reply 回覆，不會用到每月推播額度。</span></div>
+      <div class="card"><b>Render</b><span>執行程式。閒置 15 分鐘會休眠，喚醒約 1 分鐘；每月 750 小時免費。</span></div>
+      <div class="card"><b>Neon</b><span>保存揪團與投票。閒置 5 分鐘會暫停，下次使用時自動喚醒，資料不會遺失。</span></div>
+      <div class="card"><b>GitHub</b><span>存放程式碼。改完檔案存檔，Render 會自動重新部署。</span></div>
+    </div>
+    <p class="note">群組安靜一陣子後，第一個按按鈕的人要等最久：Render 喚醒約 1 分鐘，Neon 再喚醒一下。之後的操作都會即時回應。</p>
+  </section>
+</main>
+
+</body></html>

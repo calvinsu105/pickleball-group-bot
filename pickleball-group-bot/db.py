@@ -88,6 +88,34 @@ class Database:
     def get_poll(self, poll_id):
         return self._execute("SELECT * FROM polls WHERE id = ?", (poll_id,), fetch="one")
 
+    def list_polls(self, chat_id):
+        """這個群組的所有揪團（最新的在前），附上參加人數 yes_count。"""
+        return self._execute(
+            "SELECT p.*, COALESCE(SUM(CASE WHEN v.choice = 'yes' THEN 1 ELSE 0 END), 0) AS yes_count"
+            " FROM polls p LEFT JOIN votes v ON v.poll_id = p.id"
+            " WHERE p.chat_id = ? GROUP BY p.id ORDER BY p.created_at DESC",
+            (chat_id,), fetch="all",
+        )
+
+    def count_yes(self, poll_id):
+        row = self._execute(
+            "SELECT COUNT(*) AS n FROM votes WHERE poll_id = ? AND choice = 'yes'",
+            (poll_id,), fetch="one",
+        )
+        return row["n"]
+
+    def delete_poll(self, poll_id):
+        """刪除揪團與它的所有投票（同一個連線內完成）。"""
+        conn = self._connect()
+        q = "%s" if self.is_pg else "?"
+        try:
+            conn.execute(f"DELETE FROM votes WHERE poll_id = {q}", (poll_id,))
+            conn.execute(f"DELETE FROM polls WHERE id = {q}", (poll_id,))
+            if not self.is_pg:
+                conn.commit()
+        finally:
+            conn.close()
+
     # ---- 投票 ----
     def vote(self, poll_id, user_id, display_name, choice):
         self._execute(UPSERT_VOTE, (poll_id, user_id, display_name, choice, time.time()))
