@@ -23,7 +23,7 @@ from linebot.v3.webhooks import (
 
 from cards import delete_confirm_card, list_carousel, poll_card
 from db import Database
-from polls import LIST_COMMAND, TEMPLATE, TRIGGER, is_trigger, parse_poll
+from polls import LIST_COMMAND, headcount, next_guest_state, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
 
 app = Flask(__name__)
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
@@ -35,6 +35,7 @@ HELP = (
     f"在群組輸入以「{TRIGGER}」開頭的訊息，就會建立報名卡片：\n\n"
     f"{TEMPLATE}\n\n"
     "大家按卡片上的「參加／不參加」即可報名，名單會自動更新。\n"
+    "要帶群組以外的朋友，按「➕ 攜伴」，每按一次多算 1 人。\n"
     f"輸入「{LIST_COMMAND}」可查看所有揪團場次，也可以在那裡刪除場次。"
 )
 GONE = "⚠️ 這場揪團已經被刪除了。輸入「場次」查看目前的揪團。"
@@ -70,6 +71,12 @@ def flex(contents, alt):
 def card_message(poll, note=None):
     bubble, alt = poll_card(poll, db.get_votes(poll["id"]), note)
     return flex(bubble, alt)
+
+
+def waitlist_note(poll, user_id):
+    """如果這個人（含攜伴）在候補名單中，回傳提示文字。"""
+    _, waitlist, _ = split_roster(db.get_votes(poll["id"]), poll["capacity"])
+    return "，名額不足排入候補" if any(v["user_id"] == user_id for v in waitlist) else ""
 
 
 def list_messages(chat_id):
@@ -141,7 +148,7 @@ def on_text(event):
 def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
-    if action not in ("vote", "show", "ask_delete", "delete", "cancel") or not data.get("poll", "").isdigit():
+    if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel") or not data.get("poll", "").isdigit():
         return
 
     src = event.source
@@ -161,13 +168,24 @@ def on_postback(event):
             name = display_name(api, src)
             db.vote(poll["id"], src.user_id, name, data["choice"])
             label = "參加" if data["choice"] == "yes" else "不參加"
+            label += waitlist_note(poll, src.user_id)
             reply(api, token, [card_message(poll, f"最新名單（{name} {label}）")])
+
+        elif action == "guest" and data.get("delta") in ("1", "-1"):
+            name = display_name(api, src)
+            current = db.get_vote(poll["id"], src.user_id)
+            choice, guests, keep_order, msg = next_guest_state(current, int(data["delta"]))
+            if choice:
+                db.set_vote(poll["id"], src.user_id, name, choice, guests, keep_order)
+                msg += waitlist_note(poll, src.user_id)
+            reply(api, token, [card_message(poll, f"最新名單（{name} {msg}）")])
 
         elif action == "show":
             reply(api, token, [card_message(poll, "目前名單")])
 
         elif action == "ask_delete":
-            bubble, alt = delete_confirm_card(poll, db.count_yes(poll["id"]))
+            votes = db.get_votes(poll["id"])
+            bubble, alt = delete_confirm_card(poll, headcount(v for v in votes if v["choice"] == "yes"))
             reply(api, token, [flex(bubble, alt)])
 
         elif action == "delete":

@@ -1,5 +1,5 @@
 """產生 LINE Flex Message 卡片（純 dict，方便測試）。"""
-from polls import split_roster
+from polls import headcount, split_roster
 
 GREEN = "#1B7F5B"
 GREY = "#888888"
@@ -34,13 +34,25 @@ def _button(label, data, display, style, color=None):
     return btn
 
 
+def _name(v, with_guests=True):
+    n = v["display_name"] or "成員"
+    g = v.get("guests") or 0
+    return f"{n} +{g}" if with_guests and g else n
+
+
+def _guest_row(pid, date):
+    return {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+        _button("➕ 攜伴", f"action=guest&poll={pid}&delta=1", f"➕ 多帶 1 人（{date}）", "secondary"),
+        _button("➖ 攜伴", f"action=guest&poll={pid}&delta=-1", f"➖ 少帶 1 人（{date}）", "secondary"),
+    ]}
+
+
 def poll_card(poll, votes, note=None):
     """揪團卡片：活動資訊 + 目前名單 + 投票按鈕。建立時與每次投票後都用同一張卡。"""
     cap = poll["capacity"]
     going, waitlist, not_going = split_roster(votes, cap)
-    name = lambda v: v["display_name"] or "成員"
 
-    count = f"{len(going)}/{cap}" if cap else f"{len(going)}"
+    count = f"{headcount(going)}/{cap}" if cap else f"{headcount(going)}"
     info = [
         _row("日期", poll["date"]),
         _row("時間", poll["time"]),
@@ -52,15 +64,18 @@ def poll_card(poll, votes, note=None):
     if poll.get("creator_name"):
         info.append(_row("團主", poll["creator_name"]))
 
-    roster = _section(f"✋ 參加（{count}）", [name(v) for v in going], "還沒有人報名，快來搶頭香！", GREEN)
+    roster = _section(f"✋ 參加（{count}）", [_name(v) for v in going], "還沒有人報名，快來搶頭香！", GREEN)
     if cap:
-        roster += _section(f"⏳ 候補（{len(waitlist)}）", [name(v) for v in waitlist], "無")
-    roster += _section(f"🙅 不參加（{len(not_going)}）", [name(v) for v in not_going], "無", GREY)
+        roster += _section(f"⏳ 候補（{headcount(waitlist)}）", [_name(v) for v in waitlist], "無")
+    roster += _section(f"🙅 不參加（{len(not_going)}）", [_name(v, False) for v in not_going], "無", GREY)
 
     pid = poll["id"]
     footer = [
-        _button("✋ 參加", f"action=vote&poll={pid}&choice=yes", "✋ 我要參加", "primary"),
-        _button("🙅 不參加", f"action=vote&poll={pid}&choice=no", "🙅 我不參加", "secondary"),
+        {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+            _button("✋ 參加", f"action=vote&poll={pid}&choice=yes", "✋ 我要參加", "primary"),
+            _button("🙅 不參加", f"action=vote&poll={pid}&choice=no", "🙅 我不參加", "secondary"),
+        ]},
+        _guest_row(pid, poll["date"]),
     ]
 
     header_texts = [{"type": "text", "text": "🏓 匹克球揪團", "color": "#FFFFFF", "weight": "bold", "size": "lg"}]
@@ -73,7 +88,7 @@ def poll_card(poll, votes, note=None):
                    "paddingAll": "16px", "contents": header_texts},
         "body": {"type": "box", "layout": "vertical", "spacing": "sm",
                  "contents": info + [{"type": "separator", "margin": "lg"}] + roster},
-        "footer": {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": footer},
+        "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": footer},
     }
     alt = f"🏓 匹克球揪團 {poll['date']} {poll['time']} @{poll['venue']}（參加 {count}）"
     return bubble, alt[:400]
@@ -85,14 +100,16 @@ def _short(poll):
 
 def list_carousel(polls):
     """「場次」指令：每個揪團一張小卡，可左右滑動（最多 12 張）。
-    polls 需含 yes_count（參加人數），由 db.list_polls 提供。"""
+    polls 需含 votes，由 db.list_polls 提供。人數都包含攜伴。"""
     bubbles = []
     for p in polls[:12]:
-        cap, yes = p["capacity"], p["yes_count"]
+        cap = p["capacity"]
+        going, waitlist, _ = split_roster(p["votes"], cap)
         if cap:
-            status = f"參加 {min(yes, cap)}/{cap}" + (f"，候補 {yes - cap}" if yes > cap else "")
+            wait = headcount(waitlist)
+            status = f"參加 {headcount(going)}/{cap}" + (f"，候補 {wait}" if wait else "")
         else:
-            status = f"參加 {yes} 人"
+            status = f"參加 {headcount(going)} 人"
         rows = [
             _row("時間", p["time"]),
             _row("場地", p["venue"]),
@@ -113,6 +130,7 @@ def list_carousel(polls):
                     _button("✋ 參加", f"action=vote&poll={pid}&choice=yes", f"✋ 我要參加 {p['date']}", "primary"),
                     _button("🙅 不參加", f"action=vote&poll={pid}&choice=no", f"🙅 我不參加 {p['date']}", "secondary"),
                 ]},
+                _guest_row(pid, p["date"]),
                 {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
                     _button("📋 名單", f"action=show&poll={pid}", f"📋 查看 {p['date']} 名單", "link"),
                     _button("🗑 刪除", f"action=ask_delete&poll={pid}", f"🗑 刪除 {p['date']} 場次", "link",

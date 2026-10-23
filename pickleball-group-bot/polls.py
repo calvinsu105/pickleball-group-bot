@@ -57,11 +57,52 @@ def parse_poll(text):
     return fields, missing
 
 
+MAX_GUESTS = 5  # 每人最多攜伴人數
+
+
+def party_size(vote):
+    """本人 + 攜伴人數。"""
+    return 1 + (vote.get("guests") or 0)
+
+
 def split_roster(votes, capacity):
-    """votes: 依投票先後排序的 list（每筆含 choice）。
-    回傳 (正取, 候補, 不參加)。有人取消時，候補會自動依序遞補。"""
-    going = [v for v in votes if v["choice"] == "yes"]
+    """votes: 依投票先後排序的 list（每筆含 choice、guests）。
+    回傳 (正取, 候補, 不參加)。
+
+    攜伴的人與同伴算同一組，整組一起正取或一起候補，不會拆開。
+    嚴格依報名順序：前面的組放不下時，後面的人也一律候補（不插隊），
+    所以有人取消或減少攜伴時，只會讓候補依序遞補，已正取的人不會被擠掉。"""
+    yes = [v for v in votes if v["choice"] == "yes"]
     not_going = [v for v in votes if v["choice"] == "no"]
-    if capacity:
-        return going[:capacity], going[capacity:], not_going
+    if not capacity:
+        return yes, [], not_going
+    going, used = [], 0
+    for i, v in enumerate(yes):
+        if used + party_size(v) > capacity:
+            return going, yes[i:], not_going
+        going.append(v)
+        used += party_size(v)
     return going, [], not_going
+
+
+def headcount(votes):
+    """一群投票的總人數（含攜伴）。"""
+    return sum(party_size(v) for v in votes)
+
+
+def next_guest_state(current, delta):
+    """按「➕／➖ 攜伴」後的新狀態。
+    current: 目前的投票（沒投過為 None）。
+    回傳 (choice, guests, keep_order, 訊息)；不需要變更時 choice 為 None。"""
+    if delta > 0:
+        if current is None or current["choice"] != "yes":
+            return "yes", 1, False, "報名並攜伴 1 人"
+        guests = current.get("guests") or 0
+        if guests >= MAX_GUESTS:
+            return None, guests, True, f"每人最多攜伴 {MAX_GUESTS} 人"
+        # 增加攜伴視為新的報名，整組重新排到最後，不會擠掉已經正取的人
+        return "yes", guests + 1, False, f"攜伴 {guests + 1} 人"
+    if current is None or current["choice"] != "yes" or not current.get("guests"):
+        return None, 0, True, "目前沒有攜伴"
+    guests = current["guests"] - 1
+    return "yes", guests, True, f"攜伴 {guests} 人" if guests else "取消攜伴"

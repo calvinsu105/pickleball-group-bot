@@ -17,6 +17,7 @@ PG_SCHEMA = [
         user_id TEXT NOT NULL,
         display_name TEXT,
         choice TEXT NOT NULL,
+        guests INTEGER NOT NULL DEFAULT 0,
         voted_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (poll_id, user_id))""",
 ]
@@ -26,15 +27,27 @@ SQLITE_SCHEMA = [
     for s in PG_SCHEMA
 ]
 
-# 改票時：同樣選擇保留原本的順位；換選擇才重新排隊
+# 按參加／不參加：同樣選擇保留原本的順位與攜伴；換選擇才重新排隊，攜伴歸零
 UPSERT_VOTE = """
-INSERT INTO votes (poll_id, user_id, display_name, choice, voted_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO votes (poll_id, user_id, display_name, choice, guests, voted_at)
+VALUES (?, ?, ?, ?, 0, ?)
 ON CONFLICT (poll_id, user_id) DO UPDATE SET
     display_name = excluded.display_name,
     choice = excluded.choice,
+    guests = CASE WHEN votes.choice = excluded.choice THEN votes.guests ELSE 0 END,
     voted_at = CASE WHEN votes.choice = excluded.choice
                     THEN votes.voted_at ELSE excluded.voted_at END
+"""
+
+# 按攜伴按鈕：直接寫入計算好的狀態
+SET_VOTE = """
+INSERT INTO votes (poll_id, user_id, display_name, choice, guests, voted_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (poll_id, user_id) DO UPDATE SET
+    display_name = excluded.display_name,
+    choice = excluded.choice,
+    guests = excluded.guests,
+    voted_at = excluded.voted_at
 """
 
 
@@ -46,6 +59,16 @@ class Database:
             self.sqlite_path = self.url or "polls.db"
         for stmt in PG_SCHEMA if self.is_pg else SQLITE_SCHEMA:
             self._execute(stmt)
+        self._migrate()
+
+    def _migrate(self):
+        """舊版資料庫沒有 guests 欄位時自動補上（原有資料不受影響）。"""
+        if self.is_pg:
+            self._execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS guests INTEGER NOT NULL DEFAULT 0")
+        else:
+            cols = [r["name"] for r in self._execute("PRAGMA table_info(votes)", fetch="all")]
+            if "guests" not in cols:
+                self._execute("ALTER TABLE votes ADD COLUMN guests INTEGER NOT NULL DEFAULT 0")
 
     # ---- 底層 ----
     def _connect(self):
@@ -89,20 +112,18 @@ class Database:
         return self._execute("SELECT * FROM polls WHERE id = ?", (poll_id,), fetch="one")
 
     def list_polls(self, chat_id):
-        """這個群組的所有揪團（最新的在前），附上參加人數 yes_count。"""
-        return self._execute(
-            "SELECT p.*, COALESCE(SUM(CASE WHEN v.choice = 'yes' THEN 1 ELSE 0 END), 0) AS yes_count"
-            " FROM polls p LEFT JOIN votes v ON v.poll_id = p.id"
-            " WHERE p.chat_id = ? GROUP BY p.id ORDER BY p.created_at DESC",
-            (chat_id,), fetch="all",
-        )
-
-    def count_yes(self, poll_id):
-        row = self._execute(
-            "SELECT COUNT(*) AS n FROM votes WHERE poll_id = ? AND choice = 'yes'",
-            (poll_id,), fetch="one",
-        )
-        return row["n"]
+        """這個群組的所有揪團（最新的在前），每筆附上 votes（依投票先後排序）。"""
+        polls = self._execute(
+            "SELECT * FROM polls WHERE chat_id = ? ORDER BY created_at DESC", (chat_id,), fetch="all")
+        votes = self._execute(
+            "SELECT v.* FROM votes v JOIN polls p ON p.id = v.poll_id"
+            " WHERE p.chat_id = ? ORDER BY v.voted_at, v.user_id", (chat_id,), fetch="all")
+        by_poll = {}
+        for v in votes:
+            by_poll.setdefault(v["poll_id"], []).append(v)
+        for p in polls:
+            p["votes"] = by_poll.get(p["id"], [])
+        return polls
 
     def delete_poll(self, poll_id):
         """刪除揪團與它的所有投票（同一個連線內完成）。"""
@@ -119,6 +140,16 @@ class Database:
     # ---- 投票 ----
     def vote(self, poll_id, user_id, display_name, choice):
         self._execute(UPSERT_VOTE, (poll_id, user_id, display_name, choice, time.time()))
+
+    def get_vote(self, poll_id, user_id):
+        return self._execute(
+            "SELECT * FROM votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id), fetch="one")
+
+    def set_vote(self, poll_id, user_id, display_name, choice, guests, keep_order):
+        """寫入攜伴變更。keep_order=True 時保留原本的報名順位。"""
+        current = self.get_vote(poll_id, user_id)
+        voted_at = current["voted_at"] if keep_order and current else time.time()
+        self._execute(SET_VOTE, (poll_id, user_id, display_name, choice, guests, voted_at))
 
     def get_votes(self, poll_id):
         return self._execute(
