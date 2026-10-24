@@ -21,6 +21,14 @@ PG_SCHEMA = [
         guests INTEGER NOT NULL DEFAULT 0,
         voted_at DOUBLE PRECISION NOT NULL,
         PRIMARY KEY (poll_id, user_id))""",
+    # 簽到紀錄：guests 是實際到場的同伴人數
+    """CREATE TABLE IF NOT EXISTS checkins (
+        poll_id INTEGER NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL,
+        display_name TEXT,
+        guests INTEGER NOT NULL DEFAULT 0,
+        checked_at DOUBLE PRECISION NOT NULL,
+        PRIMARY KEY (poll_id, user_id))""",
     # 已處理過的 LINE 事件編號，用來忽略 LINE 重送的重複事件
     """CREATE TABLE IF NOT EXISTS processed_events (
         event_id TEXT PRIMARY KEY,
@@ -147,10 +155,11 @@ class Database:
         return polls
 
     def delete_poll(self, poll_id):
-        """刪除揪團與它的所有投票（同一個連線內完成）。"""
+        """刪除揪團與它的所有投票、簽到（同一個連線內完成）。"""
         conn = self._connect()
         q = "%s" if self.is_pg else "?"
         try:
+            conn.execute(f"DELETE FROM checkins WHERE poll_id = {q}", (poll_id,))
             conn.execute(f"DELETE FROM votes WHERE poll_id = {q}", (poll_id,))
             conn.execute(f"DELETE FROM polls WHERE id = {q}", (poll_id,))
             if not self.is_pg:
@@ -171,6 +180,27 @@ class Database:
         current = self.get_vote(poll_id, user_id)
         voted_at = current["voted_at"] if keep_order and current else time.time()
         self._execute(SET_VOTE, (poll_id, user_id, display_name, choice, guests, voted_at))
+
+    # ---- 簽到 ----
+    def checkin(self, poll_id, user_id, display_name, guests):
+        """簽到或更新實到同伴人數（重複簽到保留第一次的簽到時間）。"""
+        self._execute(
+            "INSERT INTO checkins (poll_id, user_id, display_name, guests, checked_at)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT (poll_id, user_id) DO UPDATE SET"
+            " display_name = excluded.display_name, guests = excluded.guests",
+            (poll_id, user_id, display_name, guests, time.time()),
+        )
+
+    def cancel_checkin(self, poll_id, user_id):
+        self._execute("DELETE FROM checkins WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))
+
+    def get_checkin(self, poll_id, user_id):
+        return self._execute(
+            "SELECT * FROM checkins WHERE poll_id = ? AND user_id = ?", (poll_id, user_id), fetch="one")
+
+    def get_checkins(self, poll_id):
+        return self._execute(
+            "SELECT * FROM checkins WHERE poll_id = ? ORDER BY checked_at, user_id", (poll_id,), fetch="all")
 
     def get_votes(self, poll_id):
         return self._execute(

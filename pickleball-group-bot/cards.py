@@ -1,5 +1,5 @@
 """產生 LINE Flex Message 卡片（純 dict，方便測試）。"""
-from polls import headcount, split_roster
+from polls import headcount, parse_amount, split_cost, split_roster
 
 GREEN = "#1B7F5B"
 GREY = "#888888"
@@ -57,7 +57,7 @@ def poll_card(poll, votes, note=None):
         _row("日期", poll["date"]),
         _row("時間", poll["time"]),
         _row("場地", poll["venue"]),
-        _row("價錢", poll["price"]),
+        _row("場地費", poll["price"]),
     ]
     if cap:
         info.append(_row("人數", f"上限 {cap} 人"))
@@ -76,6 +76,7 @@ def poll_card(poll, votes, note=None):
             _button("🙅 不參加", f"action=vote&poll={pid}&choice=no", "🙅 我不參加", "secondary"),
         ]},
         _guest_row(pid, poll["date"]),
+        _button("📍 到場簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "link"),
     ]
 
     header_texts = [{"type": "text", "text": "🏓 匹克球揪團", "color": "#FFFFFF", "weight": "bold", "size": "lg"}]
@@ -113,7 +114,7 @@ def list_carousel(polls):
         rows = [
             _row("時間", p["time"]),
             _row("場地", p["venue"]),
-            _row("價錢", p["price"]),
+            _row("場地費", p["price"]),
             _row("報名", status),
         ]
         if p.get("creator_name"):
@@ -133,6 +134,7 @@ def list_carousel(polls):
                 _guest_row(pid, p["date"]),
                 {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
                     _button("📋 名單", f"action=show&poll={pid}", f"📋 查看 {p['date']} 名單", "link"),
+                    _button("📍 簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{p['date']}）", "link"),
                     _button("🗑 刪除", f"action=ask_delete&poll={pid}", f"🗑 刪除 {p['date']} 場次", "link",
                             color="#C0392B"),
                 ]},
@@ -159,3 +161,77 @@ def delete_confirm_card(poll, yes_count):
         ]},
     }
     return bubble, f"確定要刪除 {_short(poll)} 的揪團？"[:400]
+
+
+def guest_choice_card(poll, registered_guests, current=None):
+    """有攜伴的人簽到時，選擇實際到了幾位同伴。"""
+    pid = poll["id"]
+    buttons = [
+        _button("只有本人" if g == 0 else f"本人＋{g} 位同伴", f"action=checkin&poll={pid}&g={g}",
+                "📍 簽到（本人）" if g == 0 else f"📍 簽到（本人＋{g}）",
+                "primary" if g == registered_guests else "secondary")
+        for g in range(registered_guests + 1)
+    ]
+    sub = f"報名時攜伴 {registered_guests} 人，實際到了幾位？"
+    if current is not None:
+        sub += f"\n（目前簽到：本人＋{current} 位）" if current else "\n（目前簽到：只有本人）"
+    bubble = {
+        "type": "bubble", "size": "kilo",
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
+            {"type": "text", "text": "📍 到場簽到", "weight": "bold", "size": "md"},
+            {"type": "text", "text": _short(poll), "size": "sm", "wrap": True},
+            {"type": "text", "text": sub, "size": "xs", "color": GREY, "wrap": True},
+        ]},
+        "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons},
+    }
+    return bubble, f"📍 簽到：{_short(poll)}"[:400]
+
+
+def checkin_card(poll, votes, checkins, note=None):
+    """簽到表：實到名單、還沒簽到的人、實到人數與每人應付金額。"""
+    pid = poll["id"]
+    present = headcount(checkins)
+    checked_ids = {c["user_id"] for c in checkins}
+    going, _, _ = split_roster(votes, poll["capacity"])
+    missing = [_name(v) for v in going if v["user_id"] not in checked_ids]
+
+    total = parse_amount(poll["price"])
+    cost = split_cost(total, present)
+    if total is None:
+        money = [_row("場地費", f"{poll['price']}（無法辨識金額）")]
+    elif cost is None:
+        money = [_row("場地費", f"總額 {total:,} 元"), _row("每人", "等大家簽到後計算")]
+    else:
+        per, collected, extra = cost
+        detail = f"合計 {collected:,} 元" + (f"，多收 {extra} 元" if extra else "")
+        money = [_row("場地費", f"總額 {total:,} 元"),
+                 _row("每人", f"{per:,} 元（{present} 人平分）"),
+                 {"type": "text", "text": detail, "size": "xs", "color": GREY, "align": "end"}]
+
+    body = [
+        {"type": "text", "text": f"✅ 實到 {present} 人", "weight": "bold", "size": "xl", "color": GREEN},
+        _row("時間", f"{poll['date']} {poll['time']}"),
+        _row("場地", poll["venue"]),
+        {"type": "separator", "margin": "lg"},
+        *money,
+        {"type": "separator", "margin": "lg"},
+        *_section(f"📍 已簽到（{len(checkins)} 組）", [_name(c) for c in checkins], "還沒有人簽到", GREEN),
+        *_section(f"⌛ 報名但未簽到（{len(missing)}）", missing, "無", GREY),
+    ]
+    header = [{"type": "text", "text": "📍 簽到表", "color": "#FFFFFF", "weight": "bold", "size": "lg"}]
+    if note:
+        header.append({"type": "text", "text": note, "color": "#DFF5EA", "size": "xs", "wrap": True})
+    bubble = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "backgroundColor": GREEN,
+                   "paddingAll": "16px", "contents": header},
+        "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body},
+        "footer": {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+            _button("📍 簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "primary"),
+            _button("↩️ 取消簽到", f"action=checkin_cancel&poll={pid}", "↩️ 取消簽到", "secondary"),
+        ]},
+    }
+    alt = f"📍 簽到表 {poll['date']}：實到 {present} 人"
+    if cost:
+        alt += f"，每人 {cost[0]} 元"
+    return bubble, alt[:400]

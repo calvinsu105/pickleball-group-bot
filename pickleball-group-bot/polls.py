@@ -13,14 +13,14 @@ FIELD_LABELS = {
     "capacity": ["人數上限", "人數", "名額", "上限"],
 }
 REQUIRED = ["date", "time", "venue", "price"]
-FIELD_NAMES = {"date": "日期", "time": "時間", "venue": "場地", "price": "價錢", "capacity": "人數"}
+FIELD_NAMES = {"date": "日期", "time": "時間", "venue": "場地", "price": "場地費", "capacity": "人數"}
 
 TEMPLATE = (
     "揪團\n"
     "日期：10/5（日）\n"
     "時間：19:00-21:00\n"
     "場地：信義運動中心 3F\n"
-    "價錢：150 元/人\n"
+    "場地費：1200（總額，依實到人數平分）\n"
     "人數：8（可不填）"
 )
 
@@ -106,3 +106,18 @@ def next_guest_state(current, delta):
         return None, 0, True, "目前沒有攜伴"
     guests = current["guests"] - 1
     return "yes", guests, True, f"攜伴 {guests} 人" if guests else "取消攜伴"
+
+
+def parse_amount(text):
+    """從「1,200 元」這類文字取出金額；找不到數字回傳 None。"""
+    m = re.search(r"\d[\d,]*", text or "")
+    return int(m.group().replace(",", "")) if m else None
+
+
+def split_cost(total, people):
+    """場地費總額依實到人數平分，無條件進位到整數。
+    回傳 (每人金額, 實收合計, 多收金額)；沒有人到場時回傳 None。"""
+    if not people or total is None:
+        return None
+    per = -(-total // people)  # 無條件進位
+    return per, per * people, per * people - total

@@ -22,7 +22,7 @@ from linebot.v3.webhooks import (
     TextMessageContent,
 )
 
-from cards import delete_confirm_card, list_carousel, poll_card
+from cards import checkin_card, delete_confirm_card, guest_choice_card, list_carousel, poll_card
 from db import Database
 from polls import LIST_COMMAND, headcount, next_guest_state, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
 
@@ -37,6 +37,7 @@ HELP = (
     f"{TEMPLATE}\n\n"
     "大家按卡片上的「參加／不參加」即可報名，名單會自動更新。\n"
     "要帶群組以外的朋友，按「➕ 攜伴」，每按一次多算 1 人。\n"
+    "到場後按「📍 到場簽到」，會顯示實到人數與每人應付的場地費。\n"
     f"輸入「{LIST_COMMAND}」可查看所有揪團場次，也可以在那裡刪除場次。"
 )
 GONE = "⚠️ 這場揪團已經被刪除了。輸入「場次」查看目前的揪團。"
@@ -78,6 +79,17 @@ def waitlist_note(poll, user_id):
     """如果這個人（含攜伴）在候補名單中，回傳提示文字。"""
     _, waitlist, _ = split_roster(db.get_votes(poll["id"]), poll["capacity"])
     return "，名額不足排入候補" if any(v["user_id"] == user_id for v in waitlist) else ""
+
+
+def registered_guests(poll, user_id):
+    """這個人報名參加時登記的攜伴人數（沒報名或不參加為 0）。"""
+    vote = db.get_vote(poll["id"], user_id)
+    return vote["guests"] if vote and vote["choice"] == "yes" else 0
+
+
+def checkin_message(poll, note=None):
+    bubble, alt = checkin_card(poll, db.get_votes(poll["id"]), db.get_checkins(poll["id"]), note)
+    return flex(bubble, alt)
 
 
 def list_messages(chat_id):
@@ -174,7 +186,8 @@ def on_text(event):
 def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
-    if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel") or not data.get("poll", "").isdigit():
+    if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel",
+                      "checkin_start", "checkin", "checkin_cancel") or not data.get("poll", "").isdigit():
         return
 
     src = event.source
@@ -205,6 +218,36 @@ def on_postback(event):
                 db.set_vote(poll["id"], src.user_id, name, choice, guests, keep_order)
                 msg += waitlist_note(poll, src.user_id)
             reply(api, token, [card_message(poll, f"最新名單（{name} {msg}）")])
+
+        elif action == "checkin_start":
+            # 有攜伴 → 先選實到幾位同伴；沒有攜伴 → 直接簽到
+            registered = registered_guests(poll, src.user_id)
+            current = db.get_checkin(poll["id"], src.user_id)
+            if registered:
+                bubble, alt = guest_choice_card(poll, registered, current and current["guests"])
+                reply(api, token, [flex(bubble, alt)])
+            elif current:
+                reply(api, token, [checkin_message(poll, f"{current['display_name']} 已經簽到過了")])
+            else:
+                name = display_name(api, src)
+                db.checkin(poll["id"], src.user_id, name, 0)
+                reply(api, token, [checkin_message(poll, f"{name} 簽到成功")])
+
+        elif action == "checkin" and data.get("g", "").isdigit():
+            guests = min(int(data["g"]), registered_guests(poll, src.user_id))
+            name = display_name(api, src)
+            db.checkin(poll["id"], src.user_id, name, guests)
+            who = f"{name}（本人＋{guests} 位）" if guests else name
+            reply(api, token, [checkin_message(poll, f"{who} 簽到成功")])
+
+        elif action == "checkin_cancel":
+            current = db.get_checkin(poll["id"], src.user_id)
+            if current:
+                db.cancel_checkin(poll["id"], src.user_id)
+                note = f"{current['display_name']} 已取消簽到"
+            else:
+                note = "你還沒有簽到"
+            reply(api, token, [checkin_message(poll, note)])
 
         elif action == "show":
             reply(api, token, [card_message(poll, "目前名單")])
