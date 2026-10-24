@@ -1,5 +1,5 @@
 """產生 LINE Flex Message 卡片（純 dict，方便測試）。"""
-from polls import headcount, parse_amount, split_cost, split_roster
+from polls import amount_due, headcount, parse_amount, split_cost, split_roster
 
 GREEN = "#1B7F5B"
 GREY = "#888888"
@@ -208,6 +208,35 @@ def checkin_card(poll, votes, checkins, note=None):
                  _row("每人", f"{per:,} 元（{present} 人平分）"),
                  {"type": "text", "text": detail, "size": "xs", "color": GREY, "align": "end"}]
 
+    # 付款狀態：每組顯示應付金額與是否已付款
+    pay_lines, paid_groups, received, due_total = [], 0, 0, 0
+    for i, c in enumerate(checkins, 1):
+        due = amount_due(poll["price"], checkins, c)
+        due_total += due or 0
+        paid = c.get("paid_amount")
+        if paid is not None:
+            paid_groups += 1
+            received += paid
+            line = f"{i}. {_name(c)}　✅ 已付" + (f" {paid:,} 元" if due is not None else "款")
+            if due is not None and paid != due:
+                line += f"（現應付 {due:,}）"
+        else:
+            line = f"{i}. {_name(c)}　⬜ 未付" + (f" {due:,} 元" if due is not None else "")
+        pay_lines.append(line)
+    if checkins:
+        summary = f"💰 已付款 {paid_groups}/{len(checkins)} 組"
+        if cost:
+            summary += f"，已收 {received:,} / {due_total:,} 元"
+        checked_section = [
+            {"type": "text", "text": f"📍 已簽到（{len(checkins)} 組）", "weight": "bold", "size": "sm",
+             "color": GREEN, "margin": "lg"},
+            {"type": "text", "text": "\n".join(pay_lines), "size": "sm", "wrap": True, "margin": "sm",
+             "color": "#333333"},
+            {"type": "text", "text": summary, "size": "sm", "weight": "bold", "margin": "md", "wrap": True},
+        ]
+    else:
+        checked_section = _section("📍 已簽到（0 組）", [], "還沒有人簽到", GREEN)
+
     body = [
         {"type": "text", "text": f"✅ 實到 {present} 人", "weight": "bold", "size": "xl", "color": GREEN},
         _row("時間", f"{poll['date']} {poll['time']}"),
@@ -215,8 +244,10 @@ def checkin_card(poll, votes, checkins, note=None):
         {"type": "separator", "margin": "lg"},
         *money,
         {"type": "separator", "margin": "lg"},
-        *_section(f"📍 已簽到（{len(checkins)} 組）", [_name(c) for c in checkins], "還沒有人簽到", GREEN),
+        *checked_section,
         *_section(f"⌛ 報名但未簽到（{len(missing)}）", missing, "無", GREY),
+        {"type": "text", "text": "匯款後請按「💰 我已付款」，並自行保存匯款證明，方便日後查帳。",
+         "size": "xxs", "color": GREY, "wrap": True, "margin": "lg"},
     ]
     header = [{"type": "text", "text": "📍 簽到表", "color": "#FFFFFF", "weight": "bold", "size": "lg"}]
     if note:
@@ -226,9 +257,15 @@ def checkin_card(poll, votes, checkins, note=None):
         "header": {"type": "box", "layout": "vertical", "backgroundColor": GREEN,
                    "paddingAll": "16px", "contents": header},
         "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body},
-        "footer": {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
-            _button("📍 簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "primary"),
-            _button("↩️ 取消簽到", f"action=checkin_cancel&poll={pid}", "↩️ 取消簽到", "secondary"),
+        "footer": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
+            {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+                _button("📍 簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "primary"),
+                _button("↩️ 取消簽到", f"action=checkin_cancel&poll={pid}", "↩️ 取消簽到", "secondary"),
+            ]},
+            {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+                _button("💰 我已付款", f"action=pay&poll={pid}", "💰 我已付款", "primary", color="#B7791F"),
+                _button("取消付款", f"action=unpay&poll={pid}", "取消付款", "secondary"),
+            ]},
         ]},
     }
     alt = f"📍 簽到表 {poll['date']}：實到 {present} 人"

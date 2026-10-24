@@ -121,3 +121,9 @@ def split_cost(total, people):
         return None
     per = -(-total // people)  # 無條件進位
     return per, per * people, per * people - total
+
+
+def amount_due(poll_price, checkins, checkin):
+    """這一組（本人＋實到同伴）應付的金額；無法計算時回傳 None。"""
+    cost = split_cost(parse_amount(poll_price), headcount(checkins))
+    return cost[0] * party_size(checkin) if cost else None

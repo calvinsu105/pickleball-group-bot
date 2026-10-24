@@ -28,6 +28,8 @@ PG_SCHEMA = [
         display_name TEXT,
         guests INTEGER NOT NULL DEFAULT 0,
         checked_at DOUBLE PRECISION NOT NULL,
+        paid_amount INTEGER,
+        paid_at DOUBLE PRECISION,
         PRIMARY KEY (poll_id, user_id))""",
     # 已處理過的 LINE 事件編號，用來忽略 LINE 重送的重複事件
     """CREATE TABLE IF NOT EXISTS processed_events (
@@ -74,14 +76,21 @@ class Database:
             self._execute(stmt)
         self._migrate()
 
+    # 舊版資料庫缺少的欄位：(資料表, 欄位, 型別)。啟動時自動補上，原有資料不受影響。
+    MIGRATIONS = [
+        ("votes", "guests", "INTEGER NOT NULL DEFAULT 0"),
+        ("checkins", "paid_amount", "INTEGER"),          # NULL = 尚未付款
+        ("checkins", "paid_at", "DOUBLE PRECISION"),
+    ]
+
     def _migrate(self):
-        """舊版資料庫沒有 guests 欄位時自動補上（原有資料不受影響）。"""
-        if self.is_pg:
-            self._execute("ALTER TABLE votes ADD COLUMN IF NOT EXISTS guests INTEGER NOT NULL DEFAULT 0")
-        else:
-            cols = [r["name"] for r in self._execute("PRAGMA table_info(votes)", fetch="all")]
-            if "guests" not in cols:
-                self._execute("ALTER TABLE votes ADD COLUMN guests INTEGER NOT NULL DEFAULT 0")
+        for table, col, typ in self.MIGRATIONS:
+            if self.is_pg:
+                self._execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+            else:
+                cols = [r["name"] for r in self._execute(f"PRAGMA table_info({table})", fetch="all")]
+                if col not in cols:
+                    self._execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ.replace('DOUBLE PRECISION', 'REAL')}")
 
     # ---- 底層 ----
     def _connect(self):
@@ -190,6 +199,15 @@ class Database:
             " display_name = excluded.display_name, guests = excluded.guests",
             (poll_id, user_id, display_name, guests, time.time()),
         )
+
+    def set_paid(self, poll_id, user_id, amount):
+        """標記已付款並記下當時的應付金額；amount 為 None 時取消付款。"""
+        if amount is None:
+            self._execute("UPDATE checkins SET paid_amount = NULL, paid_at = NULL"
+                          " WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))
+        else:
+            self._execute("UPDATE checkins SET paid_amount = ?, paid_at = ?"
+                          " WHERE poll_id = ? AND user_id = ?", (amount, time.time(), poll_id, user_id))
 
     def cancel_checkin(self, poll_id, user_id):
         self._execute("DELETE FROM checkins WHERE poll_id = ? AND user_id = ?", (poll_id, user_id))

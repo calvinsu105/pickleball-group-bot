@@ -24,7 +24,7 @@ from linebot.v3.webhooks import (
 
 from cards import checkin_card, delete_confirm_card, guest_choice_card, list_carousel, poll_card
 from db import Database
-from polls import LIST_COMMAND, headcount, next_guest_state, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
+from polls import LIST_COMMAND, amount_due, headcount, next_guest_state, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
 
 app = Flask(__name__)
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
@@ -187,7 +187,7 @@ def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
     if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel",
-                      "checkin_start", "checkin", "checkin_cancel") or not data.get("poll", "").isdigit():
+                      "checkin_start", "checkin", "checkin_cancel", "pay", "unpay") or not data.get("poll", "").isdigit():
         return
 
     src = event.source
@@ -245,8 +245,40 @@ def on_postback(event):
             if current:
                 db.cancel_checkin(poll["id"], src.user_id)
                 note = f"{current['display_name']} 已取消簽到"
+                if current.get("paid_amount") is not None:
+                    note += "（付款紀錄也一併取消）"
             else:
                 note = "你還沒有簽到"
+            reply(api, token, [checkin_message(poll, note)])
+
+        elif action == "pay":
+            current = db.get_checkin(poll["id"], src.user_id)
+            if not current:
+                reply(api, token, [checkin_message(poll, "請先按「📍 簽到」再按已付款")])
+                return
+            due = amount_due(poll["price"], db.get_checkins(poll["id"]), current)
+            name = current["display_name"]
+            paid = current.get("paid_amount")
+            if paid is not None:
+                # 已付款就不覆蓋金額，保留實際匯款時記下的數字，方便查帳
+                note = f"{name} 已經付過款了"
+                if due is not None and paid != due:
+                    diff = paid - due
+                    note += f"（已付 {paid:,} 元，現應付 {due:,} 元，" + \
+                        (f"多付 {diff:,} 元" if diff > 0 else f"還差 {-diff:,} 元") + "，請與團主確認）"
+                reply(api, token, [checkin_message(poll, note)])
+                return
+            db.set_paid(poll["id"], src.user_id, due if due is not None else 0)
+            amount = f" {due:,} 元" if due is not None else ""
+            reply(api, token, [checkin_message(poll, f"{name} 已付款{amount}，請自行保存匯款證明")])
+
+        elif action == "unpay":
+            current = db.get_checkin(poll["id"], src.user_id)
+            if current and current.get("paid_amount") is not None:
+                db.set_paid(poll["id"], src.user_id, None)
+                note = f"{current['display_name']} 已取消付款"
+            else:
+                note = "你還沒有標記付款"
             reply(api, token, [checkin_message(poll, note)])
 
         elif action == "show":
