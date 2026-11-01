@@ -127,3 +127,41 @@ def amount_due(poll_price, checkins, checkin):
     """這一組（本人＋實到同伴）應付的金額；無法計算時回傳 None。"""
     cost = split_cost(parse_amount(poll_price), headcount(checkins))
     return cost[0] * party_size(checkin) if cost else None
+
+
+MENTIONS_PER_MESSAGE = 20   # 每則訊息最多 tag 幾人（超過就分成多則）
+MAX_MENTION_MESSAGES = 4    # 一次回覆最多 5 則訊息，保留 1 則給卡片
+
+
+def _safe(text):
+    """使用者輸入的文字若含大括號，會被 LINE 當成 tag 代號，換成全形避免出錯。"""
+    return str(text).replace("{", "｛").replace("}", "｝")
+
+
+def build_mentions(header, entries, footer=""):
+    """產生 tag 訊息。
+    entries: [(user_id, 名字後面要接的文字), ...]
+    回傳 [(text, {代號: user_id}), ...]，人多時自動分成多則。"""
+    chunks = [entries[i:i + MENTIONS_PER_MESSAGE] for i in range(0, len(entries), MENTIONS_PER_MESSAGE)]
+    messages = []
+    for n, chunk in enumerate(chunks[:MAX_MENTION_MESSAGES]):
+        lines = [_safe(header)] if n == 0 else []
+        subs = {}
+        for i, (user_id, suffix) in enumerate(chunk):
+            key = f"u{i}"
+            subs[key] = user_id
+            lines.append(f"{{{key}}}{_safe(suffix)}")
+        if n == min(len(chunks), MAX_MENTION_MESSAGES) - 1:
+            hidden = len(entries) - MENTIONS_PER_MESSAGE * MAX_MENTION_MESSAGES
+            if hidden > 0:
+                lines.append(f"…另有 {hidden} 人未列出")
+            if footer:
+                lines.append(_safe(footer))
+        messages.append(("\n".join(lines), subs))
+    return messages
+
+
+def promoted_users(before_going, after_going, actor_id):
+    """從候補遞補為正取的人（不含自己操作的人）。"""
+    before = {v["user_id"] for v in before_going}
+    return [v for v in after_going if v["user_id"] not in before and v["user_id"] != actor_id]

@@ -11,9 +11,12 @@ from linebot.v3.messaging import (
     Configuration,
     FlexContainer,
     FlexMessage,
+    MentionSubstitutionObject,
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
+    TextMessageV2,
+    UserMentionTarget,
 )
 from linebot.v3.webhooks import (
     JoinEvent,
@@ -24,7 +27,7 @@ from linebot.v3.webhooks import (
 
 from cards import checkin_card, delete_confirm_card, guest_choice_card, list_carousel, poll_card
 from db import Database
-from polls import LIST_COMMAND, amount_due, headcount, next_guest_state, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
+from polls import LIST_COMMAND, amount_due, build_mentions, headcount, next_guest_state, promoted_users, split_roster, TEMPLATE, TRIGGER, is_trigger, parse_poll
 
 app = Flask(__name__)
 handler = WebhookHandler(os.environ["LINE_CHANNEL_SECRET"])
@@ -85,6 +88,35 @@ def registered_guests(poll, user_id):
     """這個人報名參加時登記的攜伴人數（沒報名或不參加為 0）。"""
     vote = db.get_vote(poll["id"], user_id)
     return vote["guests"] if vote and vote["choice"] == "yes" else 0
+
+
+def mention_messages(header, entries, footer=""):
+    """把 build_mentions 的結果轉成 LINE 的 tag 訊息（Text message v2）。"""
+    return [
+        TextMessageV2(text=text, substitution={
+            key: MentionSubstitutionObject(mentionee=UserMentionTarget(user_id=uid))
+            for key, uid in subs.items()
+        })
+        for text, subs in build_mentions(header, entries, footer)
+    ]
+
+
+def going_now(poll):
+    going, _, _ = split_roster(db.get_votes(poll["id"]), poll["capacity"])
+    return going
+
+
+def promotion_messages(poll, before_going, actor_id):
+    """有人因為別人取消或減少攜伴而從候補補上時，tag 通知他們。"""
+    promoted = promoted_users(before_going, going_now(poll), actor_id)
+    if not promoted:
+        return []
+    header = f"🎉 候補遞補成功！{poll['date']} {poll['time']} {poll['venue']}"
+    return mention_messages(header, [(v["user_id"], "") for v in promoted], "已從候補改為正取，請準時到場。")
+
+
+def guest_text(n):
+    return f"（＋{n} 位同伴）" if n else ""
 
 
 def checkin_message(poll, note=None):
@@ -187,7 +219,8 @@ def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
     if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel",
-                      "checkin_start", "checkin", "checkin_cancel", "pay", "unpay") or not data.get("poll", "").isdigit():
+                      "checkin_start", "checkin", "checkin_cancel", "pay", "unpay",
+                      "notify_going", "notify_checkin", "notify_pay") or not data.get("poll", "").isdigit():
         return
 
     src = event.source
@@ -205,19 +238,57 @@ def on_postback(event):
 
         if action == "vote" and data.get("choice") in ("yes", "no"):
             name = display_name(api, src)
+            before = going_now(poll)
             db.vote(poll["id"], src.user_id, name, data["choice"])
             label = "參加" if data["choice"] == "yes" else "不參加"
             label += waitlist_note(poll, src.user_id)
-            reply(api, token, [card_message(poll, f"最新名單（{name} {label}）")])
+            reply(api, token, [card_message(poll, f"最新名單（{name} {label}）")]
+                  + promotion_messages(poll, before, src.user_id))
 
         elif action == "guest" and data.get("delta") in ("1", "-1"):
             name = display_name(api, src)
             current = db.get_vote(poll["id"], src.user_id)
             choice, guests, keep_order, msg = next_guest_state(current, int(data["delta"]))
+            before = going_now(poll)
             if choice:
                 db.set_vote(poll["id"], src.user_id, name, choice, guests, keep_order)
                 msg += waitlist_note(poll, src.user_id)
-            reply(api, token, [card_message(poll, f"最新名單（{name} {msg}）")])
+            reply(api, token, [card_message(poll, f"最新名單（{name} {msg}）")]
+                  + promotion_messages(poll, before, src.user_id))
+
+        elif action == "notify_going":
+            going = going_now(poll)
+            if not going:
+                reply(api, token, [TextMessage(text="目前沒有正取的參加者。")])
+                return
+            header = f"📣 揪團提醒：{poll['date']} {poll['time']}\n📍 {poll['venue']}"
+            entries = [(v["user_id"], guest_text(v.get("guests") or 0)) for v in going]
+            reply(api, token, mention_messages(header, entries, "請準時到場，到了記得按「📍 到場簽到」！"))
+
+        elif action == "notify_checkin":
+            checked = {c["user_id"] for c in db.get_checkins(poll["id"])}
+            missing = [v for v in going_now(poll) if v["user_id"] not in checked]
+            if not missing:
+                reply(api, token, [TextMessage(text="✅ 正取的人都已經簽到了。")])
+                return
+            header = f"📍 還沒簽到：{poll['date']} {poll['time']} {poll['venue']}"
+            entries = [(v["user_id"], "") for v in missing]
+            reply(api, token, mention_messages(header, entries, "到場後請按簽到表上的「📍 簽到」；沒來的話不用理會。"))
+
+        elif action == "notify_pay":
+            checkins = db.get_checkins(poll["id"])
+            unpaid = [c for c in checkins if c.get("paid_amount") is None]
+            if not unpaid:
+                text = "✅ 已簽到的人都付款了。" if checkins else "還沒有人簽到，無法計算金額。"
+                reply(api, token, [TextMessage(text=text)])
+                return
+            entries = []
+            for c in unpaid:
+                due = amount_due(poll["price"], checkins, c)
+                entries.append((c["user_id"], (f"　{due:,} 元" if due is not None else "") + guest_text(c["guests"])))
+            header = f"💰 場地費提醒：{poll['date']} {poll['venue']}"
+            reply(api, token, mention_messages(
+                header, entries, "匯款後請按「💰 我已付款」，並自行保存匯款證明。"))
 
         elif action == "checkin_start":
             # 有攜伴 → 先選實到幾位同伴；沒有攜伴 → 直接簽到

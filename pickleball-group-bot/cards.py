@@ -76,7 +76,10 @@ def poll_card(poll, votes, note=None):
             _button("🙅 不參加", f"action=vote&poll={pid}&choice=no", "🙅 我不參加", "secondary"),
         ]},
         _guest_row(pid, poll["date"]),
-        _button("📍 到場簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "link"),
+        {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+            _button("📍 到場簽到", f"action=checkin_start&poll={pid}", f"📍 簽到（{poll['date']}）", "link"),
+            _button("📣 通知參加者", f"action=notify_going&poll={pid}", "📣 通知參加者", "link"),
+        ]},
     ]
 
     header_texts = [{"type": "text", "text": "🏓 匹克球揪團", "color": "#FFFFFF", "weight": "bold", "size": "lg"}]
@@ -265,6 +268,10 @@ def checkin_card(poll, votes, checkins, note=None):
             {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
                 _button("💰 我已付款", f"action=pay&poll={pid}", "💰 我已付款", "primary", color="#B7791F"),
                 _button("取消付款", f"action=unpay&poll={pid}", "取消付款", "secondary"),
+            ]},
+            {"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
+                _button("📣 催簽到", f"action=notify_checkin&poll={pid}", "📣 提醒還沒簽到的人", "link"),
+                _button("📣 催付款", f"action=notify_pay&poll={pid}", "📣 提醒還沒付款的人", "link"),
             ]},
         ]},
     }
