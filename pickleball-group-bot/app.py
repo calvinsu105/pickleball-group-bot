@@ -213,161 +213,157 @@ def on_text(event):
         reply(api, event.reply_token, [card_message(db.get_poll(poll_id), "報名開始！請按下方按鈕")])
 
 
+POSTBACK_ACTIONS = ("vote", "guest", "show", "ask_delete", "delete", "cancel",
+                    "checkin_start", "checkin", "checkin_cancel", "pay", "unpay",
+                    "notify_going", "notify_checkin", "notify_pay")
+NEEDS_NAME = ("vote", "guest", "checkin_start", "checkin", "delete")
+
+
 @handler.add(PostbackEvent)
 @once
 def on_postback(event):
     data = {k: v[0] for k, v in parse_qs(event.postback.data).items()}
     action = data.get("action")
-    if action not in ("vote", "guest", "show", "ask_delete", "delete", "cancel",
-                      "checkin_start", "checkin", "checkin_cancel", "pay", "unpay",
-                      "notify_going", "notify_checkin", "notify_pay") or not data.get("poll", "").isdigit():
+    if action not in POSTBACK_ACTIONS or not data.get("poll", "").isdigit():
         return
 
     src = event.source
     with ApiClient(configuration) as client:
         api = MessagingApi(client)
-        token = event.reply_token
-        poll = db.get_poll(int(data["poll"]))
+        # 1. 先向 LINE 查名稱（網路呼叫放在鎖外面，不讓其他人等）
+        name = display_name(api, src) if action in NEEDS_NAME else None
+        # 2. 鎖住這場揪團：讀 → 算 → 寫 → 組回覆，全部在同一筆交易內完成
+        with db.poll_lock(int(data["poll"])):
+            messages = postback_messages(action, data, src, name)
+        # 3. 交易完成、鎖放開後才回覆 LINE
+        if messages:
+            reply(api, event.reply_token, messages)
 
-        if not poll:  # 已被刪除的場次，舊卡片上的按鈕仍可能被按到
-            if action != "cancel":
-                reply(api, token, [TextMessage(text=GONE)])
-            return
-        if poll["chat_id"] != chat_id_of(src):
-            return  # 不是這個群組的揪團
 
-        if action == "vote" and data.get("choice") in ("yes", "no"):
-            name = display_name(api, src)
-            before = going_now(poll)
-            db.vote(poll["id"], src.user_id, name, data["choice"])
-            label = "參加" if data["choice"] == "yes" else "不參加"
-            label += waitlist_note(poll, src.user_id)
-            reply(api, token, [card_message(poll, f"最新名單（{name} {label}）")]
-                  + promotion_messages(poll, before, src.user_id))
+def postback_messages(action, data, src, name):
+    """處理按鈕事件並回傳要回覆的訊息。只讀寫資料庫，不呼叫 LINE API。"""
+    poll = db.get_poll(int(data["poll"]))
+    if not poll:  # 已被刪除的場次，舊卡片上的按鈕仍可能被按到
+        return [] if action == "cancel" else [TextMessage(text=GONE)]
+    if poll["chat_id"] != chat_id_of(src):
+        return []  # 不是這個群組的揪團
+    pid, uid = poll["id"], src.user_id
 
-        elif action == "guest" and data.get("delta") in ("1", "-1"):
-            name = display_name(api, src)
-            current = db.get_vote(poll["id"], src.user_id)
-            choice, guests, keep_order, msg = next_guest_state(current, int(data["delta"]))
-            before = going_now(poll)
-            if choice:
-                db.set_vote(poll["id"], src.user_id, name, choice, guests, keep_order)
-                msg += waitlist_note(poll, src.user_id)
-            reply(api, token, [card_message(poll, f"最新名單（{name} {msg}）")]
-                  + promotion_messages(poll, before, src.user_id))
+    if action == "vote" and data.get("choice") in ("yes", "no"):
+        before = going_now(poll)
+        db.vote(pid, uid, name, data["choice"])
+        label = "參加" if data["choice"] == "yes" else "不參加"
+        label += waitlist_note(poll, uid)
+        return [card_message(poll, f"最新名單（{name} {label}）")] + promotion_messages(poll, before, uid)
 
-        elif action == "notify_going":
-            going = going_now(poll)
-            if not going:
-                reply(api, token, [TextMessage(text="目前沒有正取的參加者。")])
-                return
-            header = f"📣 揪團提醒：{poll['date']} {poll['time']}\n📍 {poll['venue']}"
-            entries = [(v["user_id"], guest_text(v.get("guests") or 0)) for v in going]
-            reply(api, token, mention_messages(header, entries, "請準時到場，到了記得按「📍 到場簽到」！"))
+    if action == "guest" and data.get("delta") in ("1", "-1"):
+        current = db.get_vote(pid, uid)
+        choice, guests, keep_order, msg = next_guest_state(current, int(data["delta"]))
+        before = going_now(poll)
+        if choice:
+            db.set_vote(pid, uid, name, choice, guests, keep_order, current=current)
+            msg += waitlist_note(poll, uid)
+        return [card_message(poll, f"最新名單（{name} {msg}）")] + promotion_messages(poll, before, uid)
 
-        elif action == "notify_checkin":
-            checked = {c["user_id"] for c in db.get_checkins(poll["id"])}
-            missing = [v for v in going_now(poll) if v["user_id"] not in checked]
-            if not missing:
-                reply(api, token, [TextMessage(text="✅ 正取的人都已經簽到了。")])
-                return
-            header = f"📍 還沒簽到：{poll['date']} {poll['time']} {poll['venue']}"
-            entries = [(v["user_id"], "") for v in missing]
-            reply(api, token, mention_messages(header, entries, "到場後請按簽到表上的「📍 簽到」；沒來的話不用理會。"))
+    if action == "notify_going":
+        going = going_now(poll)
+        if not going:
+            return [TextMessage(text="目前沒有正取的參加者。")]
+        header = f"📣 揪團提醒：{poll['date']} {poll['time']}\n📍 {poll['venue']}"
+        entries = [(v["user_id"], guest_text(v.get("guests") or 0)) for v in going]
+        return mention_messages(header, entries, "請準時到場，到了記得按「📍 到場簽到」！")
 
-        elif action == "notify_pay":
-            checkins = db.get_checkins(poll["id"])
-            unpaid = [c for c in checkins if c.get("paid_amount") is None]
-            if not unpaid:
-                text = "✅ 已簽到的人都付款了。" if checkins else "還沒有人簽到，無法計算金額。"
-                reply(api, token, [TextMessage(text=text)])
-                return
-            entries = []
-            for c in unpaid:
-                due = amount_due(poll["price"], checkins, c)
-                entries.append((c["user_id"], (f"　{due:,} 元" if due is not None else "") + guest_text(c["guests"])))
-            header = f"💰 場地費提醒：{poll['date']} {poll['venue']}"
-            reply(api, token, mention_messages(
-                header, entries, "匯款後請按「💰 我已付款」，並自行保存匯款證明。"))
+    if action == "notify_checkin":
+        checked = {c["user_id"] for c in db.get_checkins(pid)}
+        missing = [v for v in going_now(poll) if v["user_id"] not in checked]
+        if not missing:
+            return [TextMessage(text="✅ 正取的人都已經簽到了。")]
+        header = f"📍 還沒簽到：{poll['date']} {poll['time']} {poll['venue']}"
+        return mention_messages(header, [(v["user_id"], "") for v in missing],
+                                "到場後請按簽到表上的「📍 簽到」；沒來的話不用理會。")
 
-        elif action == "checkin_start":
-            # 有攜伴 → 先選實到幾位同伴；沒有攜伴 → 直接簽到
-            registered = registered_guests(poll, src.user_id)
-            current = db.get_checkin(poll["id"], src.user_id)
-            if registered:
-                bubble, alt = guest_choice_card(poll, registered, current and current["guests"])
-                reply(api, token, [flex(bubble, alt)])
-            elif current:
-                reply(api, token, [checkin_message(poll, f"{current['display_name']} 已經簽到過了")])
-            else:
-                name = display_name(api, src)
-                db.checkin(poll["id"], src.user_id, name, 0)
-                reply(api, token, [checkin_message(poll, f"{name} 簽到成功")])
+    if action == "notify_pay":
+        checkins = db.get_checkins(pid)
+        unpaid = [c for c in checkins if c.get("paid_amount") is None]
+        if not unpaid:
+            return [TextMessage(text="✅ 已簽到的人都付款了。" if checkins else "還沒有人簽到，無法計算金額。")]
+        entries = []
+        for c in unpaid:
+            due = amount_due(poll["price"], checkins, c)
+            entries.append((c["user_id"], (f"　{due:,} 元" if due is not None else "") + guest_text(c["guests"])))
+        header = f"💰 場地費提醒：{poll['date']} {poll['venue']}"
+        return mention_messages(header, entries, "匯款後請按「💰 我已付款」，並自行保存匯款證明。")
 
-        elif action == "checkin" and data.get("g", "").isdigit():
-            guests = min(int(data["g"]), registered_guests(poll, src.user_id))
-            name = display_name(api, src)
-            db.checkin(poll["id"], src.user_id, name, guests)
-            who = f"{name}（本人＋{guests} 位）" if guests else name
-            reply(api, token, [checkin_message(poll, f"{who} 簽到成功")])
+    if action == "checkin_start":
+        # 有攜伴 → 先選實到幾位同伴；沒有攜伴 → 直接簽到
+        registered = registered_guests(poll, uid)
+        current = db.get_checkin(pid, uid)
+        if registered:
+            bubble, alt = guest_choice_card(poll, registered, current and current["guests"])
+            return [flex(bubble, alt)]
+        if current:
+            return [checkin_message(poll, f"{current['display_name']} 已經簽到過了")]
+        db.checkin(pid, uid, name, 0)
+        return [checkin_message(poll, f"{name} 簽到成功")]
 
-        elif action == "checkin_cancel":
-            current = db.get_checkin(poll["id"], src.user_id)
-            if current:
-                db.cancel_checkin(poll["id"], src.user_id)
-                note = f"{current['display_name']} 已取消簽到"
-                if current.get("paid_amount") is not None:
-                    note += "（付款紀錄也一併取消）"
-            else:
-                note = "你還沒有簽到"
-            reply(api, token, [checkin_message(poll, note)])
+    if action == "checkin" and data.get("g", "").isdigit():
+        guests = min(int(data["g"]), registered_guests(poll, uid))
+        db.checkin(pid, uid, name, guests)
+        who = f"{name}（本人＋{guests} 位）" if guests else name
+        return [checkin_message(poll, f"{who} 簽到成功")]
 
-        elif action == "pay":
-            current = db.get_checkin(poll["id"], src.user_id)
-            if not current:
-                reply(api, token, [checkin_message(poll, "請先按「📍 簽到」再按已付款")])
-                return
-            due = amount_due(poll["price"], db.get_checkins(poll["id"]), current)
-            name = current["display_name"]
-            paid = current.get("paid_amount")
-            if paid is not None:
-                # 已付款就不覆蓋金額，保留實際匯款時記下的數字，方便查帳
-                note = f"{name} 已經付過款了"
-                if due is not None and paid != due:
-                    diff = paid - due
-                    note += f"（已付 {paid:,} 元，現應付 {due:,} 元，" + \
-                        (f"多付 {diff:,} 元" if diff > 0 else f"還差 {-diff:,} 元") + "，請與團主確認）"
-                reply(api, token, [checkin_message(poll, note)])
-                return
-            db.set_paid(poll["id"], src.user_id, due if due is not None else 0)
-            amount = f" {due:,} 元" if due is not None else ""
-            reply(api, token, [checkin_message(poll, f"{name} 已付款{amount}，請自行保存匯款證明")])
+    if action == "checkin_cancel":
+        current = db.get_checkin(pid, uid)
+        if not current:
+            return [checkin_message(poll, "你還沒有簽到")]
+        db.cancel_checkin(pid, uid)
+        note = f"{current['display_name']} 已取消簽到"
+        if current.get("paid_amount") is not None:
+            note += "（付款紀錄也一併取消）"
+        return [checkin_message(poll, note)]
 
-        elif action == "unpay":
-            current = db.get_checkin(poll["id"], src.user_id)
-            if current and current.get("paid_amount") is not None:
-                db.set_paid(poll["id"], src.user_id, None)
-                note = f"{current['display_name']} 已取消付款"
-            else:
-                note = "你還沒有標記付款"
-            reply(api, token, [checkin_message(poll, note)])
+    if action == "pay":
+        current = db.get_checkin(pid, uid)
+        if not current:
+            return [checkin_message(poll, "請先按「📍 簽到」再按已付款")]
+        due = amount_due(poll["price"], db.get_checkins(pid), current)
+        who = current["display_name"]
+        paid = current.get("paid_amount")
+        if paid is not None:
+            # 已付款就不覆蓋金額，保留實際匯款時記下的數字，方便查帳
+            note = f"{who} 已經付過款了"
+            if due is not None and paid != due:
+                diff = paid - due
+                note += f"（已付 {paid:,} 元，現應付 {due:,} 元，" + \
+                    (f"多付 {diff:,} 元" if diff > 0 else f"還差 {-diff:,} 元") + "，請與團主確認）"
+            return [checkin_message(poll, note)]
+        db.set_paid(pid, uid, due if due is not None else 0)
+        amount = f" {due:,} 元" if due is not None else ""
+        return [checkin_message(poll, f"{who} 已付款{amount}，請自行保存匯款證明")]
 
-        elif action == "show":
-            reply(api, token, [card_message(poll, "目前名單")])
+    if action == "unpay":
+        current = db.get_checkin(pid, uid)
+        if current and current.get("paid_amount") is not None:
+            db.set_paid(pid, uid, None)
+            return [checkin_message(poll, f"{current['display_name']} 已取消付款")]
+        return [checkin_message(poll, "你還沒有標記付款")]
 
-        elif action == "ask_delete":
-            votes = db.get_votes(poll["id"])
-            bubble, alt = delete_confirm_card(poll, headcount(v for v in votes if v["choice"] == "yes"))
-            reply(api, token, [flex(bubble, alt)])
+    if action == "show":
+        return [card_message(poll, "目前名單")]
 
-        elif action == "delete":
-            db.delete_poll(poll["id"])
-            name = display_name(api, src)
-            msg = f"🗑 {name} 已刪除揪團：{poll['date']} {poll['time']} {poll['venue']}"
-            reply(api, token, [TextMessage(text=msg)])
+    if action == "ask_delete":
+        votes = db.get_votes(pid)
+        bubble, alt = delete_confirm_card(poll, headcount(v for v in votes if v["choice"] == "yes"))
+        return [flex(bubble, alt)]
 
-        elif action == "cancel":
-            reply(api, token, [TextMessage(text="已取消，場次沒有被刪除。")])
+    if action == "delete":
+        db.delete_poll(pid)
+        return [TextMessage(text=f"🗑 {name} 已刪除揪團：{poll['date']} {poll['time']} {poll['venue']}")]
+
+    if action == "cancel":
+        return [TextMessage(text="已取消，場次沒有被刪除。")]
+
+    return []
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@
 import os
 import random
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 
 PG_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS polls (
@@ -69,6 +71,8 @@ ON CONFLICT (poll_id, user_id) DO UPDATE SET
 class Database:
     def __init__(self, url=None):
         self.url = url if url is not None else os.environ.get("DATABASE_URL", "")
+        # 每條執行緒各自記住「目前所在的交易連線」，不會被其他執行緒共用
+        self._local = threading.local()
         self.is_pg = self.url.startswith(("postgres://", "postgresql://"))
         if not self.is_pg:
             self.sqlite_path = self.url or "polls.db"
@@ -105,19 +109,56 @@ class Database:
     def _execute(self, sql, params=(), fetch=None):
         if self.is_pg:
             sql = sql.replace("?", "%s")
-        conn = self._connect()
-        try:
-            cur = conn.execute(sql, params)
+        tx = getattr(self._local, "conn", None)
+        if tx is not None:
+            # 在 poll_lock 交易裡：用同一條連線，交易結束時才一起 commit
+            cur = tx.execute(sql, params)
             rows = cur.fetchall() if fetch else None
-            if not self.is_pg:
-                conn.commit()
-        finally:
-            conn.close()
+        else:
+            conn = self._connect()
+            try:
+                cur = conn.execute(sql, params)
+                rows = cur.fetchall() if fetch else None
+                if not self.is_pg:
+                    conn.commit()
+            finally:
+                conn.close()
         if fetch == "one":
             return dict(rows[0]) if rows else None
         if fetch == "all":
             return [dict(r) for r in rows]
         return None
+
+    @contextmanager
+    def poll_lock(self, poll_id):
+        """鎖住一場揪團，讓同一場的操作一次只處理一個。
+
+        區塊裡所有的資料庫讀寫都在同一筆交易內：成功才一起寫入，出錯就全部取消。
+        鎖住的只有這一場揪團的 polls 資料列，不同場次互不影響。
+        每筆交易只鎖這一個東西、而且一開始就鎖，所以不會互相等待形成 deadlock。
+        區塊裡不要呼叫 LINE API，避免鎖住太久。"""
+        if getattr(self._local, "conn", None) is not None:
+            raise RuntimeError("poll_lock 不能巢狀使用")
+        if self.is_pg:
+            import psycopg
+            from psycopg.rows import dict_row
+            conn = psycopg.connect(self.url, autocommit=False, row_factory=dict_row)
+            conn.execute("SELECT id FROM polls WHERE id = %s FOR UPDATE", (poll_id,))
+        else:
+            # SQLite（本機測試）沒有資料列鎖，改成鎖住整個資料庫的寫入
+            conn = sqlite3.connect(self.sqlite_path, timeout=30, isolation_level=None)
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+        self._local.conn = conn
+        try:
+            yield
+            conn.commit() if self.is_pg else conn.execute("COMMIT")
+        except BaseException:
+            conn.rollback() if self.is_pg else conn.execute("ROLLBACK")
+            raise
+        finally:
+            self._local.conn = None
+            conn.close()
 
     # ---- 重複事件 ----
     def claim_event(self, event_id):
@@ -164,17 +205,10 @@ class Database:
         return polls
 
     def delete_poll(self, poll_id):
-        """刪除揪團與它的所有投票、簽到（同一個連線內完成）。"""
-        conn = self._connect()
-        q = "%s" if self.is_pg else "?"
-        try:
-            conn.execute(f"DELETE FROM checkins WHERE poll_id = {q}", (poll_id,))
-            conn.execute(f"DELETE FROM votes WHERE poll_id = {q}", (poll_id,))
-            conn.execute(f"DELETE FROM polls WHERE id = {q}", (poll_id,))
-            if not self.is_pg:
-                conn.commit()
-        finally:
-            conn.close()
+        """刪除揪團與它的所有投票、簽到（在 poll_lock 裡呼叫時屬於同一筆交易）。"""
+        self._execute("DELETE FROM checkins WHERE poll_id = ?", (poll_id,))
+        self._execute("DELETE FROM votes WHERE poll_id = ?", (poll_id,))
+        self._execute("DELETE FROM polls WHERE id = ?", (poll_id,))
 
     # ---- 投票 ----
     def vote(self, poll_id, user_id, display_name, choice):
@@ -184,9 +218,11 @@ class Database:
         return self._execute(
             "SELECT * FROM votes WHERE poll_id = ? AND user_id = ?", (poll_id, user_id), fetch="one")
 
-    def set_vote(self, poll_id, user_id, display_name, choice, guests, keep_order):
-        """寫入攜伴變更。keep_order=True 時保留原本的報名順位。"""
-        current = self.get_vote(poll_id, user_id)
+    def set_vote(self, poll_id, user_id, display_name, choice, guests, keep_order, current=None):
+        """寫入攜伴變更。keep_order=True 時保留原本的報名順位。
+        current 是呼叫前已讀到的投票（在同一筆交易裡讀的），沒給就重新讀一次。"""
+        if current is None:
+            current = self.get_vote(poll_id, user_id)
         voted_at = current["voted_at"] if keep_order and current else time.time()
         self._execute(SET_VOTE, (poll_id, user_id, display_name, choice, guests, voted_at))
 
